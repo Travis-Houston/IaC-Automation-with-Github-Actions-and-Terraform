@@ -4,7 +4,7 @@ terraform {
     organization = "Terraform-Labs-2025" 
 
     workspaces { 
-      name = "Student-Management" 
+      name = "Student-Unmanagement" 
     } 
   } 
 }
