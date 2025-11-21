@@ -27,5 +27,5 @@
 #variables.tf
 
 variable "displaymsg" {
-    default = "12345"
+    default = "1235"
 }
