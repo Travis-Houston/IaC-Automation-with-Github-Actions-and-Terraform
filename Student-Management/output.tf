@@ -38,5 +38,5 @@
 # To display the message from null resource.
 
 output "null_resource_output" {
-    value = null_resource.name.triggers
+  value = null_resource.name.triggers
 }

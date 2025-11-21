@@ -1,10 +1,10 @@
-terraform { 
-  cloud { 
-    
-    organization = "Terraform-Labs-2025" 
+terraform {
+  cloud {
 
-    workspaces { 
-      name = "Student-Unmanagement" 
-    } 
-  } 
+    organization = "Terraform-Labs-2025"
+
+    workspaces {
+      name = "Student-Unmanagement"
+    }
+  }
 }
