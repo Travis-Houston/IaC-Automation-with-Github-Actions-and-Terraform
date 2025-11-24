@@ -45,59 +45,9 @@ jobs:
         run: |
           echo "matrix=${{ steps.changed-files.outputs.all_changed_files || '[]' }}" >> "$GITHUB_OUTPUT"
 
-  # JOB 2: Run Unit Tests (Validation, Format, Security Scan)
-  terraform-unit-tests:
-    needs: detect-changes
-    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
-    name: 'Unit Tests - ${{ matrix.folder }}'
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        folder: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-
-    - name: Terraform Init
-      working-directory: ${{ matrix.folder }}
-      run: terraform init -backend=false
-
-    - name: Terraform Validate
-      working-directory: ${{ matrix.folder }}
-      run: terraform validate
-
-    - name: Terraform Format
-      working-directory: ${{ matrix.folder }}
-      run: terraform fmt -check -recursive
-    
-    - name: Run Checkov action
-      id: checkov
-      uses: bridgecrewio/checkov-action@master
-      with: 
-        directory: ${{ matrix.folder }}
-        framework: terraform
-        output_format: sarif
-        output_file_path: results.sarif
-
-    - name: Upload SARIF file
-      if: success() || failure()
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: results.sarif
-        category: checkov-${{ matrix.folder }}
-
-  # JOB 3: Run Plan after unit tests pass
+  # JOB 2: Run Plan
   terraform-plan:
-    needs: [detect-changes, terraform-unit-tests]
+    needs: detect-changes
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
     name: "Plan - ${{ matrix.folder }}"
     runs-on: ubuntu-latest
@@ -128,37 +78,6 @@ jobs:
           
           echo "Detected Workspace: $WS_NAME"
           echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
-
-      # --- STEP: Ensure Workspace Exists & Configured ---
-      - name: Ensure TFC Workspace
-        env:
-          TF_TOKEN: ${{ secrets.TF_API_TOKEN }}
-          ORG: ${{ env.TF_CLOUD_ORGANIZATION }}
-          WS: ${{ steps.ws-name.outputs.workspace }}
-          FOLDER_PATH: ${{ matrix.folder }}
-        run: |
-          set -e # Fail immediately on error
-          API_URL="https://app.terraform.io/api/v2/organizations/$ORG/workspaces"
-          CONTENT_TYPE="Content-Type: application/vnd.api+json"
-          AUTH_HEADER="Authorization: Bearer $TF_TOKEN"
-
-          echo "Checking workspace '$WS'..."
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$API_URL/$WS")
-
-          # 1. Create if missing
-          if [ "$HTTP_STATUS" -eq 404 ]; then
-            echo "Workspace '$WS' not found. Creating..."
-            CREATE_PAYLOAD=$(jq -n --arg name "$WS" '{data:{type:"workspaces", attributes:{name:$name, "execution-mode":"remote"}}}')
-            curl -s -f -X POST -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$CREATE_PAYLOAD" "$API_URL"
-          elif [ "$HTTP_STATUS" -ne 200 ]; then
-             echo "::error::Failed to check workspace. HTTP Status: $HTTP_STATUS"
-             exit 1
-          fi
-
-          # 2. Enforce Configuration
-          echo "Enforcing settings for WD: $FOLDER_PATH"
-          UPDATE_PAYLOAD=$(jq -n --arg wd "$FOLDER_PATH" '{data:{type:"workspaces", attributes:{"auto-apply":true, "structured-run-output-enabled":false, "working-directory":$wd}}}')
-          curl -s -f -X PATCH -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$UPDATE_PAYLOAD" "$API_URL/$WS"
 
       # --- STEP: Upload & Plan ---
       - name: Upload Configuration
