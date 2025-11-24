@@ -48,43 +48,29 @@ jobs:
       - name: Set Matrices for Apply and Destroy
         id: set-matrix
         run: |
-          # Get changed directories for Apply (same as plan workflow)
-          APPLY_MATRIX='${{ steps.changed-files.outputs.all_changed_files }}'
-          if [ -z "$APPLY_MATRIX" ]; then
-            APPLY_MATRIX="[]"
-          fi
-          echo "Apply matrix: $APPLY_MATRIX"
+          # Set apply matrix directly (same as plan workflow)
+          echo "apply_matrix=${{ steps.changed-files.outputs.all_changed_files || '[]' }}" >> "$GITHUB_OUTPUT"
           
-          # Get deleted files and extract directories for Destroy
+          # Get deleted files
           DELETED_FILES='${{ steps.changed-files.outputs.deleted_files }}'
-          if [ -z "$DELETED_FILES" ]; then
-            DELETED_FILES="[]"
-          fi
           echo "Deleted files: $DELETED_FILES"
           
-          # Process deleted directories
-          if [ "$DELETED_FILES" != "" ] && [ "$DELETED_FILES" != "[]" ]; then
+          # Process deleted directories for destroy matrix
+          if [ -n "$DELETED_FILES" ] && [ "$DELETED_FILES" != "[]" ]; then
             DESTROY_MATRIX=$(echo "$DELETED_FILES" | jq -r '.[]' | xargs -r dirname | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "destroy_matrix=$DESTROY_MATRIX" >> "$GITHUB_OUTPUT"
+            echo "has_destroys=true" >> "$GITHUB_OUTPUT"
           else
-            DESTROY_MATRIX="[]"
+            echo "destroy_matrix=[]" >> "$GITHUB_OUTPUT"
+            echo "has_destroys=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Destroy matrix: $DESTROY_MATRIX"
           
-          # Set outputs based on whether matrices are empty
-          if [ "$APPLY_MATRIX" != "[]" ] && [ "$APPLY_MATRIX" != "" ]; then
+          # Set has_applies flag
+          APPLY_CHECK='${{ steps.changed-files.outputs.all_changed_files }}'
+          if [ -n "$APPLY_CHECK" ] && [ "$APPLY_CHECK" != "[]" ]; then
             echo "has_applies=true" >> "$GITHUB_OUTPUT"
-            echo "apply_matrix=$APPLY_MATRIX" >> "$GITHUB_OUTPUT"
           else
             echo "has_applies=false" >> "$GITHUB_OUTPUT"
-            echo "apply_matrix=[]" >> "$GITHUB_OUTPUT"
-          fi
-          
-          if [ "$DESTROY_MATRIX" != "[]" ] && [ "$DESTROY_MATRIX" != "" ]; then
-            echo "has_destroys=true" >> "$GITHUB_OUTPUT"
-            echo "destroy_matrix=$DESTROY_MATRIX" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_destroys=false" >> "$GITHUB_OUTPUT"
-            echo "destroy_matrix=[]" >> "$GITHUB_OUTPUT"
           fi
 
   # JOB 2: Apply (Parallel Matrix)

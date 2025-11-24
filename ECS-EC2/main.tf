@@ -1,5 +1,3 @@
-#main.tf
-#Launch Template and Auto Scaling Group for ECS EC2 Instances
 resource "aws_launch_template" "ecs_lt" {
   name_prefix   = "ecs-template"
   image_id      = "ami-0fa3fe0fa7920f68e"
