@@ -154,6 +154,38 @@ jobs:
           UPDATE_PAYLOAD=$(jq -n --arg wd "$FOLDER_PATH" '{data:{type:"workspaces", attributes:{"auto-apply":true, "structured-run-output-enabled":false, "working-directory":$wd}}}')
           curl -s -f -X PATCH -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$UPDATE_PAYLOAD" "$API_URL/$WS"
 
+          # 3. Set AWS Credentials as Environment Variables
+          echo "Setting AWS credentials in workspace..."
+          
+          # Get workspace ID
+          WS_ID=$(curl -s -H "$AUTH_HEADER" "$API_URL/$WS" | jq -r '.data.id')
+          
+          # Check and set/update AWS_ACCESS_KEY_ID
+          EXISTING_KEY=$(curl -s -H "$AUTH_HEADER" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars" | jq -r '.data[] | select(.attributes.key=="AWS_ACCESS_KEY_ID") | .id')
+          
+          if [ -n "$EXISTING_KEY" ]; then
+            echo "Updating AWS_ACCESS_KEY_ID..."
+            AWS_KEY_PAYLOAD=$(jq -n --arg value "${{ secrets.AWS_ACCESS_KEY }}" '{data:{type:"vars", attributes:{value:$value, sensitive:false}}}')
+            curl -s -X PATCH -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$AWS_KEY_PAYLOAD" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars/$EXISTING_KEY"
+          else
+            echo "Creating AWS_ACCESS_KEY_ID..."
+            AWS_KEY_PAYLOAD=$(jq -n --arg key "AWS_ACCESS_KEY_ID" --arg value "${{ secrets.AWS_ACCESS_KEY }}" '{data:{type:"vars", attributes:{key:$key, value:$value, category:"env", sensitive:false}}}')
+            curl -s -X POST -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$AWS_KEY_PAYLOAD" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars"
+          fi
+          
+          # Check and set/update AWS_SECRET_ACCESS_KEY
+          EXISTING_SECRET=$(curl -s -H "$AUTH_HEADER" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars" | jq -r '.data[] | select(.attributes.key=="AWS_SECRET_ACCESS_KEY") | .id')
+          
+          if [ -n "$EXISTING_SECRET" ]; then
+            echo "Updating AWS_SECRET_ACCESS_KEY..."
+            AWS_SECRET_PAYLOAD=$(jq -n --arg value "${{ secrets.AWS_SECRET_KEY }}" '{data:{type:"vars", attributes:{value:$value, sensitive:true}}}')
+            curl -s -X PATCH -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$AWS_SECRET_PAYLOAD" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars/$EXISTING_SECRET"
+          else
+            echo "Creating AWS_SECRET_ACCESS_KEY..."
+            AWS_SECRET_PAYLOAD=$(jq -n --arg key "AWS_SECRET_ACCESS_KEY" --arg value "${{ secrets.AWS_SECRET_KEY }}" '{data:{type:"vars", attributes:{key:$key, value:$value, category:"env", sensitive:true}}}')
+            curl -s -X POST -H "$AUTH_HEADER" -H "$CONTENT_TYPE" -d "$AWS_SECRET_PAYLOAD" "https://app.terraform.io/api/v2/workspaces/$WS_ID/vars"
+          fi
+
       # --- STEP: Upload & Apply ---
       - name: Upload Configuration
         uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
