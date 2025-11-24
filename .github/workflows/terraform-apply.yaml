@@ -48,51 +48,34 @@ jobs:
       - name: Set Matrices for Apply and Destroy
         id: set-matrix
         run: |
-          set -e
+          # Get changed directories for Apply (same as plan workflow)
+          APPLY_MATRIX='${{ steps.changed-files.outputs.all_changed_files || '[]' }}'
+          echo "Apply matrix: $APPLY_MATRIX"
           
-          # Get added/modified directories for Apply
-          CHANGED_FILES='${{ steps.changed-files.outputs.all_changed_files }}'
-          echo "Changed/Added files: $CHANGED_FILES"
-          
-          # Get deleted directories for Destroy
+          # Get deleted files and extract directories for Destroy
           DELETED_FILES='${{ steps.changed-files.outputs.deleted_files }}'
           echo "Deleted files: $DELETED_FILES"
           
-          # Handle empty or invalid JSON
-          if [ -z "$CHANGED_FILES" ] || [ "$CHANGED_FILES" = "null" ]; then
-            CHANGED_FILES="[]"
-          fi
-          
-          if [ -z "$DELETED_FILES" ] || [ "$DELETED_FILES" = "null" ]; then
-            DELETED_FILES="[]"
-          fi
-          
-          # Extract unique directories from deleted files
-          if [ "$DELETED_FILES" != "[]" ]; then
-            DELETED_DIRS=$(echo "$DELETED_FILES" | jq -r '.[]' 2>/dev/null | xargs -r dirname 2>/dev/null | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' || echo "[]")
+          # Process deleted directories
+          if [ "$DELETED_FILES" != "" ] && [ "$DELETED_FILES" != "[]" ]; then
+            DESTROY_MATRIX=$(echo "$DELETED_FILES" | jq -r '.[]' | xargs -r dirname | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
           else
-            DELETED_DIRS="[]"
+            DESTROY_MATRIX="[]"
           fi
-          echo "Deleted directories: $DELETED_DIRS"
+          echo "Destroy matrix: $DESTROY_MATRIX"
           
-          # Count items
-          APPLY_COUNT=$(echo "$CHANGED_FILES" | jq 'length' 2>/dev/null || echo "0")
-          DESTROY_COUNT=$(echo "$DELETED_DIRS" | jq 'length' 2>/dev/null || echo "0")
-          
-          # Set outputs
-          if [ "$APPLY_COUNT" -gt 0 ]; then
+          # Set outputs based on whether matrices are empty
+          if [ "$APPLY_MATRIX" != "[]" ]; then
             echo "has_applies=true" >> "$GITHUB_OUTPUT"
-            echo "apply_matrix=$CHANGED_FILES" >> "$GITHUB_OUTPUT"
-            echo "::notice::Found $APPLY_COUNT workspace(s) to apply"
+            echo "apply_matrix=$APPLY_MATRIX" >> "$GITHUB_OUTPUT"
           else
             echo "has_applies=false" >> "$GITHUB_OUTPUT"
             echo "apply_matrix=[]" >> "$GITHUB_OUTPUT"
           fi
           
-          if [ "$DESTROY_COUNT" -gt 0 ]; then
+          if [ "$DESTROY_MATRIX" != "[]" ]; then
             echo "has_destroys=true" >> "$GITHUB_OUTPUT"
-            echo "destroy_matrix=$DELETED_DIRS" >> "$GITHUB_OUTPUT"
-            echo "::notice::Found $DESTROY_COUNT workspace(s) to destroy"
+            echo "destroy_matrix=$DESTROY_MATRIX" >> "$GITHUB_OUTPUT"
           else
             echo "has_destroys=false" >> "$GITHUB_OUTPUT"
             echo "destroy_matrix=[]" >> "$GITHUB_OUTPUT"
