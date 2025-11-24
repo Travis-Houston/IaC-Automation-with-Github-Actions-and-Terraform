@@ -15,11 +15,14 @@ env:
   TF_CLOUD_ORGANIZATION: "Terraform-Labs-2025"
 
 jobs:
-  # JOB 1: Detect Changed Folders
+  # JOB 1: Detect Changed and Deleted Folders
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      apply_matrix: ${{ steps.set-matrix.outputs.apply_matrix }}
+      destroy_matrix: ${{ steps.set-matrix.outputs.destroy_matrix }}
+      has_applies: ${{ steps.set-matrix.outputs.has_applies }}
+      has_destroys: ${{ steps.set-matrix.outputs.has_destroys }}
     permissions:
       contents: read
     steps:
@@ -28,7 +31,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Get changed directories
+      - name: Get changed and deleted files
         id: changed-files
         uses: tj-actions/changed-files@v44
         with:
@@ -42,15 +45,50 @@ jobs:
              .github/**
              **/.terraform/**
 
-      - name: Set Matrix
+      - name: Set Matrices for Apply and Destroy
         id: set-matrix
         run: |
-          echo "matrix=${{ steps.changed-files.outputs.all_changed_files || '[]' }}" >> "$GITHUB_OUTPUT"
+          set -e
+          
+          # Get added/modified directories for Apply
+          CHANGED_FILES='${{ steps.changed-files.outputs.all_changed_files }}'
+          echo "Changed/Added files: $CHANGED_FILES"
+          
+          # Get deleted directories for Destroy
+          DELETED_FILES='${{ steps.changed-files.outputs.deleted_files }}'
+          echo "Deleted files: $DELETED_FILES"
+          
+          # Extract unique directories from deleted files
+          DELETED_DIRS=$(echo "$DELETED_FILES" | jq -r '.[]' | xargs -r dirname | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "Deleted directories: $DELETED_DIRS"
+          
+          # Count items
+          APPLY_COUNT=$(echo "$CHANGED_FILES" | jq 'length')
+          DESTROY_COUNT=$(echo "$DELETED_DIRS" | jq 'length')
+          
+          # Set outputs
+          if [ "$APPLY_COUNT" -gt 0 ]; then
+            echo "has_applies=true" >> "$GITHUB_OUTPUT"
+            echo "apply_matrix=$CHANGED_FILES" >> "$GITHUB_OUTPUT"
+            echo "::notice::Found $APPLY_COUNT workspace(s) to apply"
+          else
+            echo "has_applies=false" >> "$GITHUB_OUTPUT"
+            echo "apply_matrix=[]" >> "$GITHUB_OUTPUT"
+          fi
+          
+          if [ "$DESTROY_COUNT" -gt 0 ]; then
+            echo "has_destroys=true" >> "$GITHUB_OUTPUT"
+            echo "destroy_matrix=$DELETED_DIRS" >> "$GITHUB_OUTPUT"
+            echo "::notice::Found $DESTROY_COUNT workspace(s) to destroy"
+          else
+            echo "has_destroys=false" >> "$GITHUB_OUTPUT"
+            echo "destroy_matrix=[]" >> "$GITHUB_OUTPUT"
+          fi
 
   # JOB 2: Apply (Parallel Matrix)
   terraform-apply:
     needs: detect-changes
-    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
+    if: ${{ needs.detect-changes.outputs.has_applies == 'true' }}
     name: "Apply - ${{ matrix.folder }}"
     runs-on: ubuntu-latest
     permissions:
@@ -58,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        folder: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+        folder: ${{ fromJson(needs.detect-changes.outputs.apply_matrix) }}
     
     # Security: Only expose the token to this specific job
     env:
@@ -134,3 +172,120 @@ jobs:
           organization: ${{ env.TF_CLOUD_ORGANIZATION }}
           token: ${{ secrets.TF_API_TOKEN }}
           message: "Applied via GitHub Actions: ${{ matrix.folder }}"
+
+  # JOB 3: Destroy Deleted Workspaces
+  terraform-destroy:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.has_destroys == 'true' }}
+    name: "Destroy - ${{ matrix.folder }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJson(needs.detect-changes.outputs.destroy_matrix) }}
+    
+    env:
+      TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
+
+    steps:
+      - name: Checkout previous commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.before }}
+
+      - name: Resolve Workspace Name
+        id: ws-name
+        run: |
+          set -e
+          
+          FOLDER="${{ matrix.folder }}"
+          
+          if [ ! -d "$FOLDER" ]; then
+            echo "::error::Folder $FOLDER does not exist in previous commit"
+            exit 1
+          fi
+          
+          cd "$FOLDER"
+          
+          # Extract workspace name from backend.tf or other .tf files
+          WS_NAME=$(grep -h "name[[:space:]]*=" *.tf 2>/dev/null | grep -v "#" | grep "workspaces" -A 1 | grep "name" | head -n 1 | awk -F'"' '{print $2}')
+          
+          if [ -z "$WS_NAME" ]; then
+            WS_NAME=$(basename "$FOLDER")
+            echo "::warning::Workspace name not found in TF files. Using folder name: $WS_NAME"
+          fi
+          
+          echo "Detected Workspace for Destruction: $WS_NAME"
+          echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.folder }}
+        run: terraform init
+        env:
+          TF_LOG: ERROR
+
+      - name: Terraform Destroy
+        working-directory: ${{ matrix.folder }}
+        run: |
+          echo "::warning::Destroying workspace: ${{ steps.ws-name.outputs.workspace }}"
+          terraform destroy -auto-approve
+        env:
+          TF_LOG: ERROR
+
+      - name: Delete Terraform Cloud Workspace
+        run: |
+          set -e
+          
+          WS_NAME="${{ steps.ws-name.outputs.workspace }}"
+          ORG="${{ env.TF_CLOUD_ORGANIZATION }}"
+          
+          echo "Attempting to delete workspace '$WS_NAME' from Terraform Cloud..."
+          
+          # Get workspace details
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            --header "Authorization: Bearer ${{ secrets.TF_API_TOKEN }}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/organizations/$ORG/workspaces/$WS_NAME")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "::notice::Workspace '$WS_NAME' not found in Terraform Cloud (already deleted or never existed)"
+            exit 0
+          elif [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Failed to get workspace details (HTTP $HTTP_CODE)"
+            echo "$BODY"
+            exit 1
+          fi
+          
+          WS_ID=$(echo "$BODY" | jq -r '.data.id')
+          
+          if [ -z "$WS_ID" ] || [ "$WS_ID" = "null" ]; then
+            echo "::error::Could not extract workspace ID"
+            exit 1
+          fi
+          
+          # Delete the workspace
+          DELETE_RESPONSE=$(curl -s -w "\n%{http_code}" -X DELETE \
+            --header "Authorization: Bearer ${{ secrets.TF_API_TOKEN }}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/workspaces/$WS_ID")
+          
+          DELETE_HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
+          
+          if [ "$DELETE_HTTP_CODE" = "204" ]; then
+            echo "::notice::Successfully deleted workspace '$WS_NAME' from Terraform Cloud"
+          else
+            echo "::error::Failed to delete workspace (HTTP $DELETE_HTTP_CODE)"
+            echo "$DELETE_RESPONSE" | head -n-1
+            exit 1
+          fi
