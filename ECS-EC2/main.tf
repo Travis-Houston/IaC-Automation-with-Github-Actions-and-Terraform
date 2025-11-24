@@ -1,3 +1,4 @@
+#main.tf
 resource "aws_launch_template" "ecs_lt" {
   name_prefix   = "ecs-template"
   image_id      = "ami-0fa3fe0fa7920f68e"
