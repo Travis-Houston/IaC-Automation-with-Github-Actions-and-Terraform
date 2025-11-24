@@ -6,7 +6,7 @@ resource "aws_launch_template" "ecs_lt" {
   key_name               = "ec2ecs-key"
   vpc_security_group_ids = [aws_security_group.security_group.id]
   iam_instance_profile {
-    name = "ecsInstanceRole"
+    arn = aws_iam_instance_profile.ecs_instance_profile.arn
   }
 
   block_device_mappings {
@@ -115,7 +115,7 @@ resource "aws_ecs_cluster_capacity_providers" "example" {
 resource "aws_ecs_task_definition" "ecs_task_definition" {
   family             = "my-ecs-task"
   network_mode       = "awsvpc"
-  execution_role_arn = "arn:aws:iam::532199187081:role/ecsTaskExecutionRole"
+  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
   cpu                = 256
   runtime_platform {
     operating_system_family = "LINUX"
