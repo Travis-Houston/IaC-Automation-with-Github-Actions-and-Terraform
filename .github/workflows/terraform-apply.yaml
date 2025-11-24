@@ -58,13 +58,26 @@ jobs:
           DELETED_FILES='${{ steps.changed-files.outputs.deleted_files }}'
           echo "Deleted files: $DELETED_FILES"
           
+          # Handle empty or invalid JSON
+          if [ -z "$CHANGED_FILES" ] || [ "$CHANGED_FILES" = "null" ]; then
+            CHANGED_FILES="[]"
+          fi
+          
+          if [ -z "$DELETED_FILES" ] || [ "$DELETED_FILES" = "null" ]; then
+            DELETED_FILES="[]"
+          fi
+          
           # Extract unique directories from deleted files
-          DELETED_DIRS=$(echo "$DELETED_FILES" | jq -r '.[]' | xargs -r dirname | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          if [ "$DELETED_FILES" != "[]" ]; then
+            DELETED_DIRS=$(echo "$DELETED_FILES" | jq -r '.[]' 2>/dev/null | xargs -r dirname 2>/dev/null | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' || echo "[]")
+          else
+            DELETED_DIRS="[]"
+          fi
           echo "Deleted directories: $DELETED_DIRS"
           
           # Count items
-          APPLY_COUNT=$(echo "$CHANGED_FILES" | jq 'length')
-          DESTROY_COUNT=$(echo "$DELETED_DIRS" | jq 'length')
+          APPLY_COUNT=$(echo "$CHANGED_FILES" | jq 'length' 2>/dev/null || echo "0")
+          DESTROY_COUNT=$(echo "$DELETED_DIRS" | jq 'length' 2>/dev/null || echo "0")
           
           # Set outputs
           if [ "$APPLY_COUNT" -gt 0 ]; then
