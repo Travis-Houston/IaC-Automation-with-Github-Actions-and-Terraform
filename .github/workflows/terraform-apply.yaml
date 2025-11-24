@@ -49,11 +49,17 @@ jobs:
         id: set-matrix
         run: |
           # Get changed directories for Apply (same as plan workflow)
-          APPLY_MATRIX='${{ steps.changed-files.outputs.all_changed_files || '[]' }}'
+          APPLY_MATRIX='${{ steps.changed-files.outputs.all_changed_files }}'
+          if [ -z "$APPLY_MATRIX" ]; then
+            APPLY_MATRIX="[]"
+          fi
           echo "Apply matrix: $APPLY_MATRIX"
           
           # Get deleted files and extract directories for Destroy
           DELETED_FILES='${{ steps.changed-files.outputs.deleted_files }}'
+          if [ -z "$DELETED_FILES" ]; then
+            DELETED_FILES="[]"
+          fi
           echo "Deleted files: $DELETED_FILES"
           
           # Process deleted directories
@@ -65,7 +71,7 @@ jobs:
           echo "Destroy matrix: $DESTROY_MATRIX"
           
           # Set outputs based on whether matrices are empty
-          if [ "$APPLY_MATRIX" != "[]" ]; then
+          if [ "$APPLY_MATRIX" != "[]" ] && [ "$APPLY_MATRIX" != "" ]; then
             echo "has_applies=true" >> "$GITHUB_OUTPUT"
             echo "apply_matrix=$APPLY_MATRIX" >> "$GITHUB_OUTPUT"
           else
@@ -73,7 +79,7 @@ jobs:
             echo "apply_matrix=[]" >> "$GITHUB_OUTPUT"
           fi
           
-          if [ "$DESTROY_MATRIX" != "[]" ]; then
+          if [ "$DESTROY_MATRIX" != "[]" ] && [ "$DESTROY_MATRIX" != "" ]; then
             echo "has_destroys=true" >> "$GITHUB_OUTPUT"
             echo "destroy_matrix=$DESTROY_MATRIX" >> "$GITHUB_OUTPUT"
           else
