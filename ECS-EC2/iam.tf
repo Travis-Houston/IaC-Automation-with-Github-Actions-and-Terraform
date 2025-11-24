@@ -21,6 +21,12 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Additional policy for ECR access
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_ecr_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
 # IAM Role for ECS EC2 Instances
 resource "aws_iam_role" "ecs_instance_role" {
   name = "ecsInstanceRole"
