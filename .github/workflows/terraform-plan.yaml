@@ -9,45 +9,82 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TF_CLOUD_ORGANIZATION: "Terraform-Labs-2025"
+  TF_CLOUD_ORGANIZATION: "${{ secrets.TF_CLOUD_ORGANIZATION }}"
   TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
 
 jobs:
   # JOB 1: Detect Changed Folders
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+detect-changes:
+  runs-on: ubuntu-latest
 
-      - name: Get changed directories
-        id: changed-files
-        uses: tj-actions/changed-files@v44
-        with:
-          dir_names: true
-          dir_names_max_depth: 2
-          json: true
-          files: |
-            **/*.tf
-            **/*.hcl
-          files_ignore:
-            .github/**
-            **/.terraform/**
+  permissions:
+    pull-requests: read
 
-      - name: Set Matrix
-        id: set-matrix
-        run: |
-          echo "matrix=${{ steps.changed-files.outputs.all_changed_files || '[]' }}" >> "$GITHUB_OUTPUT"
+  outputs:
+    matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
 
-  # JOB 2: Run Plan
-  terraform-plan:
+  steps:
+    - name: Get changed Terraform directories
+      id: changed-files
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+      with:
+        use_rest_api: true
+        dir_names: true
+        dir_names_max_depth: 2
+        json: true
+        files: |
+          **/*.tf
+          **/*.tf.json
+          **/*.tfvars
+          **/*.tfvars.json
+          **/*.hcl
+        files_ignore: |
+          .github/**
+          **/.terraform/**
+
+  # JOB 2: Run scans (Validation, Format, Security Scan)
+  terraform-scan:
     needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
+    name: 'Unit Tests - ${{ matrix.folder }}'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform Init
+      working-directory: ${{ matrix.folder }}
+      run: terraform init -backend=false
+
+    - name: Terraform Validate
+      working-directory: ${{ matrix.folder }}
+      run: terraform validate
+
+    - name: Terraform Format
+      working-directory: ${{ matrix.folder }}
+      run: terraform fmt -check -recursive
+    
+    - name: Terraform Static Scan
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/terraform-static-scan
+      with:
+        directory: ${{ matrix.folder }}
+
+  # JOB 3: Run Plan after unit tests pass
+  terraform-plan:
+    needs: [detect-changes, terraform-unit-tests]
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
     name: "Plan - ${{ matrix.folder }}"
     runs-on: ubuntu-latest
