@@ -84,7 +84,7 @@ jobs:
 
   # JOB 3: Run Plan after unit tests pass
   terraform-plan:
-    needs: [detect-changes, terraform-unit-tests]
+    needs: [detect-changes, terraform-scan]
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
     name: "Plan - ${{ matrix.folder }}"
     runs-on: ubuntu-latest
