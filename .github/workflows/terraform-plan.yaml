@@ -14,33 +14,33 @@ env:
 
 jobs:
   # JOB 1: Detect Changed Folders
-detect-changes:
-  runs-on: ubuntu-latest
+  detect-changes:
+    runs-on: ubuntu-latest
 
-  permissions:
-    pull-requests: read
+    permissions:
+      pull-requests: read
 
-  outputs:
-    matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
+    outputs:
+      matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
 
-  steps:
-    - name: Get changed Terraform directories
-      id: changed-files
-      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
-      with:
-        use_rest_api: true
-        dir_names: true
-        dir_names_max_depth: 2
-        json: true
-        files: |
-          **/*.tf
-          **/*.tf.json
-          **/*.tfvars
-          **/*.tfvars.json
-          **/*.hcl
-        files_ignore: |
-          .github/**
-          **/.terraform/**
+    steps:
+      - name: Get changed Terraform directories
+        id: changed-files
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+        with:
+          use_rest_api: true
+          dir_names: true
+          dir_names_max_depth: 2
+          json: true
+          files: |
+            **/*.tf
+            **/*.tf.json
+            **/*.tfvars
+            **/*.tfvars.json
+            **/*.hcl
+          files_ignore: |
+            .github/**
+            **/.terraform/**
 
   # JOB 2: Run scans (Validation, Format, Security Scan)
   terraform-scan:
