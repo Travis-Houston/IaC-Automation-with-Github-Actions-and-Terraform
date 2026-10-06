@@ -16,13 +16,10 @@ jobs:
   # JOB 1: Detect Changed Folders
   detect-changes:
     runs-on: ubuntu-latest
-
     permissions:
       pull-requests: read
-
     outputs:
       matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
-
     steps:
       - name: Get changed Terraform directories
         id: changed-files
@@ -31,7 +28,7 @@ jobs:
           use_rest_api: true
           dir_names: true
           dir_names_max_depth: 2
-          json: true
+          matrix: true
           files: |
             **/*.tf
             **/*.tf.json
@@ -46,7 +43,7 @@ jobs:
   terraform-scan:
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
-    name: 'Unit Tests - ${{ matrix.folder }}'
+    name: Terraform Checks - ${{ matrix.folder }}
     runs-on: ubuntu-latest
     permissions:
       security-events: write
@@ -56,41 +53,46 @@ jobs:
       fail-fast: false
       matrix:
         folder: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-    
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-    - name: Terraform Init
-      working-directory: ${{ matrix.folder }}
-      run: terraform init -backend=false
+      - name: Terraform Init
+        working-directory: ${{ matrix.folder }}
+        run: terraform init -backend=false -input=false
 
-    - name: Terraform Validate
-      working-directory: ${{ matrix.folder }}
-      run: terraform validate
+      - name: Terraform Validate
+        working-directory: ${{ matrix.folder }}
+        run: terraform validate
 
-    - name: Terraform Format
-      working-directory: ${{ matrix.folder }}
-      run: terraform fmt -check -recursive
-    
-    - name: Terraform Static Scan
-      if: ${{ !cancelled() }}
-      uses: ./.github/actions/terraform-static-scan
-      with:
-        directory: ${{ matrix.folder }}
+      - name: Terraform Format
+        working-directory: ${{ matrix.folder }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Static Scan
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/terraform-static-scan
+        with:
+          directory: ${{ matrix.folder }}
 
   # JOB 3: Run Plan after unit tests pass
   terraform-plan:
     needs: [detect-changes, terraform-scan]
-    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
-    name: "Plan - ${{ matrix.folder }}"
+    if: >-
+      ${{ needs.detect-changes.outputs.matrix != '[]' &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    name: Plan - ${{ matrix.folder }}
     runs-on: ubuntu-latest
+    env:
+      TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+      TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
     permissions:
       contents: read
-      pull-requests: write
+      # Add pull-requests: write if you enable the PR-comment step.
     strategy:
       fail-fast: false
       matrix:
@@ -104,16 +106,12 @@ jobs:
       - name: Resolve Workspace Name
         id: ws-name
         working-directory: ${{ matrix.folder }}
+        env:
+          TF_ROOT: ${{ matrix.folder }}
         run: |
-          # Best-effort regex to find name in cloud { workspaces { name = "..." } }
-          WS_NAME=$(grep -h "name[[:space:]]*=" *.tf 2>/dev/null | grep -v "#" | head -n 1 | awk -F'"' '{print $2}')
-
-          if [ -z "$WS_NAME" ]; then
-             WS_NAME=$(basename "${{ matrix.folder }}")
-             echo "::notice::Workspace name not found in TF files. Using folder name: $WS_NAME"
-          fi
-          
-          echo "Detected Workspace: $WS_NAME"
+          # Keep your current workspace lookup here.
+          # For the fallback:
+          WS_NAME="$(basename -- "$TF_ROOT")"
           echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
 
       # --- STEP: Upload & Plan ---
