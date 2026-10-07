@@ -1,0 +1,55 @@
+name: "Terraform Static Scan"
+description: Run Checkov and Trivy against a Terraform directory
+
+inputs:
+  directory:
+    description: Terraform directory to scan
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run Checkov
+      if: ${{ !cancelled() }}
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: ${{ inputs.directory }}
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+
+    - name: Upload Checkov SARIF
+      if: ${{ !cancelled() && hashFiles('checkov-results.sarif') != '' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: checkov-results.sarif
+        category: checkov-${{ inputs.directory }}
+
+    - name: Run Trivy IaC scan
+      if: ${{ !cancelled() }}
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: config
+        scan-ref: ${{ inputs.directory }}
+        format: sarif
+        output: trivy-results.sarif
+        severity: CRITICAL,HIGH
+        limit-severities-for-sarif: true
+        exit-code: "1"
+
+    - name: Upload Trivy SARIF
+      if: ${{ !cancelled() && hashFiles('trivy-results.sarif') != '' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: trivy-results.sarif
+        category: trivy-${{ inputs.directory }}
+
+    - name: Save SARIF files as workflow artifacts
+      if: ${{ always() && !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: sarif-results-${{ inputs.directory }}-${{ github.run_id }}-${{ strategy.job-index }}
+        path: |
+          checkov-results.sarif
+          trivy-results.sarif
+        if-no-files-found: warn
