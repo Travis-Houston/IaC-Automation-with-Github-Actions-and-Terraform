@@ -3,23 +3,20 @@ name: "Terraform Plan"
 on:
   pull_request:
 
-# Cancel old runs when a new commit is pushed to the PR
+# Replace an older run when a new commit is pushed to the same PR.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  TF_CLOUD_ORGANIZATION: "${{ secrets.TF_CLOUD_ORGANIZATION }}"
-  TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
-
 jobs:
-  # JOB 1: Detect Changed Folders
+  # JOB 1: Detect changed Terraform roots
   detect-changes:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     outputs:
-      matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
+      matrix: ${{ steps.changed-files.outputs.all_modified_files || '[]' }}
     steps:
       - name: Get changed Terraform directories
         id: changed-files
@@ -34,21 +31,21 @@ jobs:
             **/*.tf.json
             **/*.tfvars
             **/*.tfvars.json
-            **/*.hcl
+            **/.terraform.lock.hcl
           files_ignore: |
             .github/**
             **/.terraform/**
 
-  # JOB 2: Run scans (Validation, Format, Security Scan)
+  # JOB 2: Validate, format, and scan each changed root
   terraform-scan:
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
     name: Terraform Checks - ${{ matrix.folder }}
     runs-on: ubuntu-latest
     permissions:
-      security-events: write
       contents: read
       actions: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +54,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        with:
+          persist-credentials: false
+  
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
@@ -73,26 +72,23 @@ jobs:
         working-directory: ${{ matrix.folder }}
         run: terraform fmt -check -recursive
 
+      # Run scans even if init, validate, or fmt failed; skip if cancelled or
+      # the changed directory is not a Terraform root.
       - name: Terraform Static Scan
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.check-root.outcome == 'success' }}
         uses: ./.github/actions/terraform-static-scan
         with:
           directory: ${{ matrix.folder }}
 
-  # JOB 3: Run Plan after unit tests pass
+  # JOB 3: Run speculative HCP Terraform plans after scans pass
   terraform-plan:
     needs: [detect-changes, terraform-scan]
-    if: >-
-      ${{ needs.detect-changes.outputs.matrix != '[]' &&
-          github.event.pull_request.head.repo.full_name == github.repository }}
-    name: Plan - ${{ matrix.folder }}
+    if: ${{ needs.detect-changes.outputs.matrix != '[]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    name: Terraform Plan - ${{ matrix.folder }}
     runs-on: ubuntu-latest
-    env:
-      TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-      TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
     permissions:
       contents: read
-      # Add pull-requests: write if you enable the PR-comment step.
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -101,32 +97,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      # --- STEP: Determine Workspace Name ---
-      - name: Resolve Workspace Name
+      # Assumes the folder's basename exactly matches its HCP Terraform workspace name.
+      - name: Resolve HCP Terraform workspace
         id: ws-name
-        working-directory: ${{ matrix.folder }}
         env:
           TF_ROOT: ${{ matrix.folder }}
         run: |
-          # Keep your current workspace lookup here.
-          # For the fallback:
+          set -euo pipefail
           WS_NAME="$(basename -- "$TF_ROOT")"
           echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
 
-      # --- STEP: Upload & Plan ---
       - name: Upload Configuration
         uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
         id: plan-upload
         with:
+          organization: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          token: ${{ secrets.TF_API_TOKEN }}
           workspace: ${{ steps.ws-name.outputs.workspace }}
           directory: "./"
-          speculative: true # IMPORTANT: This ensures it's a "Plan Only" in TFC
+          speculative: true
 
       - name: Create Plan Run
         uses: hashicorp/tfc-workflows-github/actions/create-run@v1.3.2
         id: plan-run
         with:
+          organization: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          token: ${{ secrets.TF_API_TOKEN }}
           workspace: ${{ steps.ws-name.outputs.workspace }}
           configuration_version: ${{ steps.plan-upload.outputs.configuration_version_id }}
           plan_only: true
@@ -135,36 +134,65 @@ jobs:
         uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.3.2
         id: plan-output
         with:
-          plan: ${{ fromJSON(steps.plan-run.outputs.payload).data.relationships.plan.data.id }}
+          organization: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+          token: ${{ secrets.TF_API_TOKEN }}
+          plan: ${{ steps.plan-run.outputs.plan_id }}
 
-      # - name: Update PR Comment
-      #   uses: actions/github-script@v7
-      #   if: github.event_name == 'pull_request'
-      #   with:
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
-      #     script: |
-      #       // 1. Gather outputs
-      #       const workspace = '${{ steps.ws-name.outputs.workspace }}';
-      #       const runLink = '${{ steps.plan-run.outputs.run_link }}';
-      #       const added = '${{ steps.plan-output.outputs.add }}';
-      #       const changed = '${{ steps.plan-output.outputs.change }}';
-      #       const destroyed = '${{ steps.plan-output.outputs.destroy }}';
-            
-      #       // 2. Format the comment body
-      #       const body = `#### Terraform Cloud Plan: \`${workspace}\`
-            
-      #       | Status | Count |
-      #       | :--- | :--- |
-      #       |  Add | **${added}** |
-      #       |  Change | **${changed}** |
-      #       |  Destroy | **${destroyed}** |
-            
-      #       [ View Speculative Plan in Terraform Cloud](${runLink})`;
+      # Update this workspace's comment on the PR instead of adding one per commit.
+      - name: Update PR Comment
+        uses: actions/github-script@v7
+        env:
+          TF_WORKSPACE_NAME: ${{ steps.ws-name.outputs.workspace }}
+          PLAN_RUN_LINK: ${{ steps.plan-run.outputs.run_link }}
+          PLAN_ADD: ${{ steps.plan-output.outputs.add }}
+          PLAN_CHANGE: ${{ steps.plan-output.outputs.change }}
+          PLAN_DESTROY: ${{ steps.plan-output.outputs.destroy }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const workspace = process.env.TF_WORKSPACE_NAME;
+            const marker = `<!-- terraform-plan:${workspace} -->`;
 
-      #       // 3. Create comment
-      #       github.rest.issues.createComment({
-      #         issue_number: context.issue.number,
-      #         owner: context.repo.owner,
-      #         repo: context.repo.repo,
-      #         body: body
-      #       });
+            const body = [
+              marker,
+              `#### HCP Terraform Plan: \`${workspace}\``,
+              "",
+              "| Status | Count |",
+              "| :--- | ---: |",
+              `| Add | **${process.env.PLAN_ADD || "0"}** |`,
+              `| Change | **${process.env.PLAN_CHANGE || "0"}** |`,
+              `| Destroy | **${process.env.PLAN_DESTROY || "0"}** |`,
+              "",
+              `[View speculative plan](${process.env.PLAN_RUN_LINK})`,
+            ].join("\n");
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              }
+            );
+
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
