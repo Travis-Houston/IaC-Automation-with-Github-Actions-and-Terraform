@@ -120,7 +120,7 @@ jobs:
         id: plan-upload
         with:
           workspace: ${{ steps.ws-name.outputs.workspace }}
-          directory: ${{ matrix.folder }}
+          directory: "./"
           speculative: true # IMPORTANT: This ensures it's a "Plan Only" in TFC
 
       - name: Create Plan Run
