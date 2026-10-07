@@ -83,17 +83,6 @@ jobs:
         with:
           directory: ${{ matrix.folder }}
 
-      - name: Write Scan Step Summary
-        if: always()
-        run: |
-          {
-            echo "### Terraform Scan Summary: ${{ matrix.folder }}"
-            echo ""
-            echo "- **Format:** ${{ steps.fmt.outcome }}"
-            echo "- **Validate:** ${{ steps.validate.outcome }}"
-            echo "- **Static scan:** ${{ steps.static-scan.outcome }}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
   # JOB 3: Run speculative HCP Terraform plans after scans pass
   terraform-plan:
     needs: [detect-changes, terraform-scan]
@@ -157,12 +146,13 @@ jobs:
 
       # Update this workspace's comment on the PR instead of adding one per commit.
       - name: Update PR Comment
-        if: ${{ always() && !cancelled() }}
+        if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
         uses: actions/github-script@v9
         env:
           TF_WORKSPACE_NAME: ${{ steps.ws-name.outputs.workspace }}
           TF_ROOT: ${{ matrix.folder }}
-          SCAN_RESULT: ${{ needs.terraform-scan.result }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          STATIC_SCAN_OUTCOME: ${{ steps.static-scan.outcome }}
           PLAN_RUN_OUTCOME: ${{ steps.plan-run.outcome }}
           PLAN_OUTPUT_OUTCOME: ${{ steps.plan-output.outcome }}
           HCP_RUN_LINK: ${{ steps.plan-run.outputs.run_link }}
@@ -172,14 +162,24 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const workspace = process.env.TF_WORKSPACE_NAME || process.env.TF_ROOT;
+            const workspace =
+              process.env.TF_WORKSPACE_NAME || process.env.TF_ROOT;
             const marker = `<!-- terraform-plan:${workspace} -->`;
-            const label = (result) => ({
+
+            const label = (outcome) => ({
               success: "Passed",
               failure: "Failed",
               skipped: "Not run",
               cancelled: "Cancelled",
-            }[result] || "Unknown");
+              "": "Not run",
+            }[outcome] || "Unknown");
+
+            const checks = [
+              `| Terraform validate | ${label(process.env.VALIDATE_OUTCOME)} |`,
+              `| Terraform static scan | ${label(process.env.STATIC_SCAN_OUTCOME)} |`,
+              `| HCP Terraform plan | ${label(process.env.PLAN_RUN_OUTCOME)} |`,
+              `| Plan output | ${label(process.env.PLAN_OUTPUT_OUTCOME)} |`,
+            ];
 
             const counts = process.env.PLAN_OUTPUT_OUTCOME === "success"
               ? [
@@ -200,8 +200,7 @@ jobs:
               "",
               "| Check | Status |",
               "| :--- | :--- |",
-              `| Terraform scan | ${label(process.env.SCAN_RESULT)} |`,
-              `| HCP Terraform plan | ${label(process.env.PLAN_RUN_OUTCOME)} |`,
+              ...checks,
               ...counts,
               "",
               runLink,
