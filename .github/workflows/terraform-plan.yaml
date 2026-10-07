@@ -56,24 +56,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-  
-      - name: Check Terraform root
-        id: check-root
-        env:
-          TF_ROOT: ${{ matrix.folder }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! -d "$TF_ROOT" ]]; then
-            echo "::error::Terraform root '$TF_ROOT' does not exist."
-            exit 1
-          fi
-
-          if ! find "$TF_ROOT" -maxdepth 1 -type f \
-            \( -name '*.tf' -o -name '*.tf.json' \) -print -quit | grep -q .; then
-            echo "::error::No Terraform configuration found in '$TF_ROOT'."
-            exit 1
-          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -83,25 +65,48 @@ jobs:
         run: terraform init -backend=false -input=false
 
       - name: Terraform Validate
+        id: validate
         working-directory: ${{ matrix.folder }}
         run: terraform validate
 
       - name: Terraform Format
+        id: fmt
         working-directory: ${{ matrix.folder }}
         run: terraform fmt -check -recursive
 
       # Run scans even if init, validate, or fmt failed; skip if cancelled or
       # the changed directory is not a Terraform root.
       - name: Terraform Static Scan
-        if: ${{ !cancelled() && steps.check-root.outcome == 'success' }}
+        id: static-scan
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/terraform-static-scan
         with:
           directory: ${{ matrix.folder }}
 
+      - name: Record check results
+        if: ${{ always() }}
+        env:
+          VALIDATE_RESULT: ${{ steps.validate.outcome }}
+          FORMAT_RESULT: ${{ steps.fmt.outcome }}
+          STATIC_SCAN_RESULT: ${{ steps.static-scan.outcome }}
+        run: |
+          mkdir -p .terraform-check-results
+          cat > .terraform-check-results/results.json <<EOF
+          {"validate":"${VALIDATE_RESULT}","format":"${FORMAT_RESULT}","static_scan":"${STATIC_SCAN_RESULT}"}
+          EOF
+
+      - name: Upload check results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-check-results-${{ strategy.job-index }}
+          path: .terraform-check-results/results.json
+          if-no-files-found: error
+
   # JOB 3: Run speculative HCP Terraform plans after scans pass
   terraform-plan:
     needs: [detect-changes, terraform-scan]
-    if: ${{ needs.detect-changes.outputs.matrix != '[]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ always() && needs.detect-changes.outputs.matrix != '[]' && github.event.pull_request.head.repo.full_name == github.repository }}
     name: Terraform Plan - ${{ matrix.folder }}
     runs-on: ubuntu-latest
     permissions:
@@ -118,6 +123,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download check results
+        if: ${{ always() }}
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-check-results-${{ strategy.job-index }}
+          path: .terraform-check-results
+
+      - name: Determine whether this root passed checks
+        id: check-results
+        if: ${{ always() }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          results = json.loads(Path(".terraform-check-results/results.json").read_text())
+          passed = all(results.get(check) == "success" for check in ("validate", "format", "static_scan"))
+          import os
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"checks_passed={'true' if passed else 'false'}\n")
+          PY
+
       # Assumes the folder's basename exactly matches its HCP Terraform workspace name.
       - name: Resolve HCP Terraform workspace
         id: ws-name
@@ -129,6 +156,7 @@ jobs:
           echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload Configuration
+        if: ${{ steps.check-results.outputs.checks_passed == 'true' }}
         uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
         id: plan-upload
         with:
@@ -139,6 +167,7 @@ jobs:
           speculative: true
 
       - name: Create Plan Run
+        if: ${{ steps.check-results.outputs.checks_passed == 'true' }}
         uses: hashicorp/tfc-workflows-github/actions/create-run@v1.3.2
         id: plan-run
         with:
@@ -149,6 +178,7 @@ jobs:
           plan_only: true
 
       - name: Get Plan Output
+        if: ${{ steps.check-results.outputs.checks_passed == 'true' }}
         uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.3.2
         id: plan-output
         with:
@@ -158,30 +188,80 @@ jobs:
 
       # Update this workspace's comment on the PR instead of adding one per commit.
       - name: Update PR Comment
-        uses: actions/github-script@v7
+        if: ${{ always() && !cancelled() }}
+        uses: actions/github-script@v9
         env:
           TF_WORKSPACE_NAME: ${{ steps.ws-name.outputs.workspace }}
-          PLAN_RUN_LINK: ${{ steps.plan-run.outputs.run_link }}
+          TF_ROOT: ${{ matrix.folder }}
+          CHECK_RESULTS_FILE: .terraform-check-results/results.json
+          CHECKS_PASSED: ${{ steps.check-results.outputs.checks_passed }}
+          PLAN_RUN_OUTCOME: ${{ steps.plan-run.outcome }}
+          PLAN_OUTPUT_OUTCOME: ${{ steps.plan-output.outcome }}
+          HCP_RUN_LINK: ${{ steps.plan-run.outputs.run_link }}
           PLAN_ADD: ${{ steps.plan-output.outputs.add }}
           PLAN_CHANGE: ${{ steps.plan-output.outputs.change }}
           PLAN_DESTROY: ${{ steps.plan-output.outputs.destroy }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const workspace = process.env.TF_WORKSPACE_NAME;
-            const marker = `<!-- terraform-plan:${workspace} -->`;
+            const workspace =
+              process.env.TF_WORKSPACE_NAME || process.env.TF_ROOT;
+            const marker = `<!-- terraform-report:${workspace} -->`;
+
+            const label = (outcome) => ({
+              success: "Passed",
+              failure: "Failed",
+              cancelled: "Cancelled",
+              skipped: "Not run",
+            }[outcome] || "Unknown");
+
+            let checkResults = {};
+            try {
+              checkResults = JSON.parse(
+                require("fs").readFileSync(process.env.CHECK_RESULTS_FILE, "utf8"),
+              );
+            } catch (error) {
+              core.warning(`Could not read Terraform check results: ${error.message}`);
+            }
+
+            const formatStatus = label(checkResults.format);
+            const validateStatus = label(checkResults.validate);
+            const staticScanStatus = label(checkResults.static_scan);
+            const planStatus = label(process.env.PLAN_RUN_OUTCOME);
+            const outputStatus = label(process.env.PLAN_OUTPUT_OUTCOME);
+
+            const planDetails =
+              process.env.PLAN_OUTPUT_OUTCOME === "success"
+                ? [
+                    "",
+                    "| Plan action | Count |",
+                    "| :--- | ---: |",
+                    `| Add | **${process.env.PLAN_ADD || "0"}** |`,
+                    `| Change | **${process.env.PLAN_CHANGE || "0"}** |`,
+                    `| Destroy | **${process.env.PLAN_DESTROY || "0"}** |`,
+                  ]
+                : ["", "Plan counts are unavailable; check the Actions run for details."];
+
+            const runLink = process.env.HCP_RUN_LINK
+              ? `[View speculative plan in HCP Terraform](${process.env.HCP_RUN_LINK})`
+              : "HCP Terraform run link unavailable.";
 
             const body = [
               marker,
-              `#### HCP Terraform Plan: \`${workspace}\``,
+              `### Terraform Checks & Plan: \`${workspace}\``,
               "",
-              "| Status | Count |",
-              "| :--- | ---: |",
-              `| Add | **${process.env.PLAN_ADD || "0"}** |`,
-              `| Change | **${process.env.PLAN_CHANGE || "0"}** |`,
-              `| Destroy | **${process.env.PLAN_DESTROY || "0"}** |`,
+              "| Check | Status |",
+              "| :--- | :--- |",
+              `| Terraform format | ${formatStatus} |`,
+              `| Terraform validate | ${validateStatus} |`,
+              `| Terraform static scan | ${staticScanStatus} |`,
+              `| HCP Terraform plan | ${planStatus} |`,
+              `| Plan output | ${outputStatus} |`,
+              ...planDetails,
               "",
-              `[View speculative plan](${process.env.PLAN_RUN_LINK})`,
+              runLink,
+              "",
+              `*Triggered by @${context.actor} · Commit \`${context.sha.substring(0, 7)}\`*`,
             ].join("\n");
 
             const comments = await github.paginate(
