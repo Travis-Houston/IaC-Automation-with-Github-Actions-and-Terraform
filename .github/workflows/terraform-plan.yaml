@@ -16,7 +16,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      matrix: ${{ steps.changed-files.outputs.all_modified_files || '[]' }}
+      matrix: ${{ steps.changed-files.outputs.all_changed_files || '[]' }}
     steps:
       - name: Get changed Terraform directories
         id: changed-files
@@ -57,6 +57,24 @@ jobs:
         with:
           persist-credentials: false
   
+      - name: Check Terraform root
+        id: check-root
+        env:
+          TF_ROOT: ${{ matrix.folder }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d "$TF_ROOT" ]]; then
+            echo "::error::Terraform root '$TF_ROOT' does not exist."
+            exit 1
+          fi
+
+          if ! find "$TF_ROOT" -maxdepth 1 -type f \
+            \( -name '*.tf' -o -name '*.tf.json' \) -print -quit | grep -q .; then
+            echo "::error::No Terraform configuration found in '$TF_ROOT'."
+            exit 1
+          fi
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
