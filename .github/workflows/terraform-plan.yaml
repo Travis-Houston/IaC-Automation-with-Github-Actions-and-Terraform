@@ -36,16 +36,17 @@ jobs:
             .github/**
             **/.terraform/**
 
-  # JOB 2: Validate, format, and scan each changed root
-  terraform-scan:
+  # JOB 2: Check and plan each changed root
+  terraform-checks-plan:
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
-    name: Terraform Checks - ${{ matrix.folder }}
+    name: Terraform Checks & Plan - ${{ matrix.folder }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
       security-events: write
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -61,16 +62,19 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
+        id: init
         working-directory: ${{ matrix.folder }}
         run: terraform init -backend=false -input=false
 
       - name: Terraform Validate
         id: validate
+        if: ${{ !cancelled() && steps.init.outcome == 'success' }}
         working-directory: ${{ matrix.folder }}
         run: terraform validate
 
       - name: Terraform Format
         id: fmt
+        if: ${{ !cancelled() }}
         working-directory: ${{ matrix.folder }}
         run: terraform fmt -check -recursive
 
@@ -83,29 +87,11 @@ jobs:
         with:
           directory: ${{ matrix.folder }}
 
-  # JOB 3: Run speculative HCP Terraform plans after scans pass
-  terraform-plan:
-    needs: [detect-changes, terraform-scan]
-    if: ${{ always() && needs.detect-changes.outputs.matrix != '[]' && github.event.pull_request.head.repo.full_name == github.repository }}
-    name: Terraform Plan - ${{ matrix.folder }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    strategy:
-      fail-fast: false
-      matrix:
-        folder: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
+      # Keep workspace resolution and PR reporting available after a failed check.
       # Assumes the folder's basename exactly matches its HCP Terraform workspace name.
       - name: Resolve HCP Terraform workspace
         id: ws-name
+        if: ${{ always() && !cancelled() }}
         env:
           TF_ROOT: ${{ matrix.folder }}
         run: |
@@ -114,6 +100,13 @@ jobs:
           echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload Configuration
+        if: >-
+          ${{ !cancelled() &&
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              steps.init.outcome == 'success' &&
+              steps.validate.outcome == 'success' &&
+              steps.fmt.outcome == 'success' &&
+              steps.static-scan.outcome == 'success' }}
         uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
         id: plan-upload
         with:
@@ -143,11 +136,12 @@ jobs:
 
       # Update this workspace's comment on the PR instead of adding one per commit.
       - name: Update PR Comment
-        if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
+        if: ${{ always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/github-script@v9
         env:
           TF_WORKSPACE_NAME: ${{ steps.ws-name.outputs.workspace }}
           TF_ROOT: ${{ matrix.folder }}
+          FORMAT_OUTCOME: ${{ steps.fmt.outcome }}
           VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
           STATIC_SCAN_OUTCOME: ${{ steps.static-scan.outcome }}
           PLAN_RUN_OUTCOME: ${{ steps.plan-run.outcome }}
@@ -172,6 +166,7 @@ jobs:
             }[outcome] || "Unknown");
 
             const checks = [
+              `| Terraform format | ${label(process.env.FORMAT_OUTCOME)} |`,
               `| Terraform validate | ${label(process.env.VALIDATE_OUTCOME)} |`,
               `| Terraform static scan | ${label(process.env.STATIC_SCAN_OUTCOME)} |`,
               `| HCP Terraform plan | ${label(process.env.PLAN_RUN_OUTCOME)} |`,
