@@ -48,7 +48,7 @@ runs:
       if: ${{ always() && !cancelled() }}
       uses: actions/upload-artifact@v4
       with:
-        name: sarif-results-${{ strategy.job-index }}
+        name: sarif-results-${{ inputs.directory }}-${{ github.run_id }}-${{ strategy.job-index }}
         path: |
           checkov-results.sarif
           trivy-results.sarif
