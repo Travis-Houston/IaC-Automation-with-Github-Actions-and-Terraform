@@ -45,10 +45,10 @@ runs:
         category: trivy-${{ inputs.directory }}
 
     - name: Save SARIF files as workflow artifacts
-      if: ${{ always() }}
+      if: ${{ always() && !cancelled() }}
       uses: actions/upload-artifact@v4
       with:
-        name: sarif-results
+        name: sarif-results-${{ strategy.job-index }}
         path: |
           checkov-results.sarif
           trivy-results.sarif
