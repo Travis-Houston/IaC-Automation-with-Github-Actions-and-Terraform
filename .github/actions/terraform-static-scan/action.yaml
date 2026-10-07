@@ -43,3 +43,13 @@ runs:
       with:
         sarif_file: trivy-results.sarif
         category: trivy-${{ inputs.directory }}
+
+    - name: Save SARIF files as workflow artifacts
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: sarif-results
+        path: |
+          checkov-results.sarif
+          trivy-results.sarif
+        if-no-files-found: warn
