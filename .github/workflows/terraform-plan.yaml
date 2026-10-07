@@ -83,25 +83,16 @@ jobs:
         with:
           directory: ${{ matrix.folder }}
 
-      - name: Record check results
-        if: ${{ always() }}
-        env:
-          VALIDATE_RESULT: ${{ steps.validate.outcome }}
-          FORMAT_RESULT: ${{ steps.fmt.outcome }}
-          STATIC_SCAN_RESULT: ${{ steps.static-scan.outcome }}
+      - name: Write Scan Step Summary
+        if: always()
         run: |
-          mkdir -p .terraform-check-results
-          cat > .terraform-check-results/results.json <<EOF
-          {"validate":"${VALIDATE_RESULT}","format":"${FORMAT_RESULT}","static_scan":"${STATIC_SCAN_RESULT}"}
-          EOF
-
-      - name: Upload check results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-check-results-${{ strategy.job-index }}
-          path: .terraform-check-results/results.json
-          if-no-files-found: error
+          {
+            echo "### Terraform Scan Summary: ${{ matrix.folder }}"
+            echo ""
+            echo "- **Format:** ${{ steps.fmt.outcome }}"
+            echo "- **Validate:** ${{ steps.validate.outcome }}"
+            echo "- **Static scan:** ${{ steps.static-scan.outcome }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # JOB 3: Run speculative HCP Terraform plans after scans pass
   terraform-plan:
@@ -122,28 +113,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - name: Download check results
-        if: ${{ always() }}
-        uses: actions/download-artifact@v4
-        with:
-          name: terraform-check-results-${{ strategy.job-index }}
-          path: .terraform-check-results
-
-      - name: Determine whether this root passed checks
-        id: check-results
-        if: ${{ always() }}
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          results = json.loads(Path(".terraform-check-results/results.json").read_text())
-          passed = all(results.get(check) == "success" for check in ("validate", "format", "static_scan"))
-          import os
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"checks_passed={'true' if passed else 'false'}\n")
-          PY
 
       # Assumes the folder's basename exactly matches its HCP Terraform workspace name.
       - name: Resolve HCP Terraform workspace
@@ -193,8 +162,7 @@ jobs:
         env:
           TF_WORKSPACE_NAME: ${{ steps.ws-name.outputs.workspace }}
           TF_ROOT: ${{ matrix.folder }}
-          CHECK_RESULTS_FILE: .terraform-check-results/results.json
-          CHECKS_PASSED: ${{ steps.check-results.outputs.checks_passed }}
+          SCAN_RESULT: ${{ needs.terraform-scan.result }}
           PLAN_RUN_OUTCOME: ${{ steps.plan-run.outcome }}
           PLAN_OUTPUT_OUTCOME: ${{ steps.plan-output.outcome }}
           HCP_RUN_LINK: ${{ steps.plan-run.outputs.run_link }}
@@ -204,46 +172,26 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const workspace =
-              process.env.TF_WORKSPACE_NAME || process.env.TF_ROOT;
-            const marker = `<!-- terraform-report:${workspace} -->`;
-
-            const label = (outcome) => ({
+            const workspace = process.env.TF_WORKSPACE_NAME || process.env.TF_ROOT;
+            const marker = `<!-- terraform-plan:${workspace} -->`;
+            const label = (result) => ({
               success: "Passed",
               failure: "Failed",
-              cancelled: "Cancelled",
               skipped: "Not run",
-            }[outcome] || "Unknown");
+              cancelled: "Cancelled",
+            }[result] || "Unknown");
 
-            let checkResults = {};
-            try {
-              checkResults = JSON.parse(
-                require("fs").readFileSync(process.env.CHECK_RESULTS_FILE, "utf8"),
-              );
-            } catch (error) {
-              core.warning(`Could not read Terraform check results: ${error.message}`);
-            }
-
-            const formatStatus = label(checkResults.format);
-            const validateStatus = label(checkResults.validate);
-            const staticScanStatus = label(checkResults.static_scan);
-            const planStatus = label(process.env.PLAN_RUN_OUTCOME);
-            const outputStatus = label(process.env.PLAN_OUTPUT_OUTCOME);
-
-            const planDetails =
-              process.env.PLAN_OUTPUT_OUTCOME === "success"
-                ? [
-                    "",
-                    "| Plan action | Count |",
-                    "| :--- | ---: |",
-                    `| Add | **${process.env.PLAN_ADD || "0"}** |`,
-                    `| Change | **${process.env.PLAN_CHANGE || "0"}** |`,
-                    `| Destroy | **${process.env.PLAN_DESTROY || "0"}** |`,
-                  ]
-                : ["", "Plan counts are unavailable; check the Actions run for details."];
+            const counts = process.env.PLAN_OUTPUT_OUTCOME === "success"
+              ? [
+                  "",
+                  "| Add | Change | Destroy |",
+                  "| ---: | ---: | ---: |",
+                  `| ${process.env.PLAN_ADD || "0"} | ${process.env.PLAN_CHANGE || "0"} | ${process.env.PLAN_DESTROY || "0"} |`,
+                ]
+              : ["", "Plan counts are unavailable; see the Actions run."];
 
             const runLink = process.env.HCP_RUN_LINK
-              ? `[View speculative plan in HCP Terraform](${process.env.HCP_RUN_LINK})`
+              ? `[View plan in HCP Terraform](${process.env.HCP_RUN_LINK})`
               : "HCP Terraform run link unavailable.";
 
             const body = [
@@ -252,16 +200,11 @@ jobs:
               "",
               "| Check | Status |",
               "| :--- | :--- |",
-              `| Terraform format | ${formatStatus} |`,
-              `| Terraform validate | ${validateStatus} |`,
-              `| Terraform static scan | ${staticScanStatus} |`,
-              `| HCP Terraform plan | ${planStatus} |`,
-              `| Plan output | ${outputStatus} |`,
-              ...planDetails,
+              `| Terraform scan | ${label(process.env.SCAN_RESULT)} |`,
+              `| HCP Terraform plan | ${label(process.env.PLAN_RUN_OUTCOME)} |`,
+              ...counts,
               "",
               runLink,
-              "",
-              `*Triggered by @${context.actor} · Commit \`${context.sha.substring(0, 7)}\`*`,
             ].join("\n");
 
             const comments = await github.paginate(
