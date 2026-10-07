@@ -120,7 +120,7 @@ jobs:
         id: plan-upload
         with:
           workspace: ${{ steps.ws-name.outputs.workspace }}
-          directory: "./" # Upload root to allow shared modules
+          directory: ${{ matrix.folder }}
           speculative: true # IMPORTANT: This ensures it's a "Plan Only" in TFC
 
       - name: Create Plan Run
